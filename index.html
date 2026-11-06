@@ -1,1 +1,298 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>صندوق فایل‌کلیدی</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 20px;
+      background: #111317;
+      color: #eee;
+      font: 16px/1.8 system-ui, sans-serif;
+    }
+    main { max-width: 600px; margin: auto; }
+    section {
+      padding: 18px;
+      margin: 16px 0;
+      background: #1c1f25;
+      border: 1px solid #383c45;
+      border-radius: 12px;
+    }
+    h1, h2 { margin: 0 0 12px; }
+    label { display: block; margin: 12px 0 5px; }
+    textarea, input, button {
+      width: 100%;
+      padding: 11px;
+      font: inherit;
+      border-radius: 8px;
+    }
+    textarea, input {
+      background: #101216;
+      color: #eee;
+      border: 1px solid #555;
+    }
+    textarea { min-height: 130px; resize: vertical; }
+    button {
+      margin-top: 12px;
+      background: #4168cd;
+      color: white;
+      border: 0;
+      cursor: pointer;
+    }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      background: #101216;
+      padding: 12px;
+      border-radius: 8px;
+    }
+    small { color: #bbb; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>صندوق فایل‌کلیدی</h1>
 
+  <section>
+    <h2>ساخت فایل کلید</h2>
+    <button id="makeKey">ساخت و دانلود key.js</button>
+    <small>این فایل محرمانه است. از آن نسخهٔ پشتیبان بگیر و منتشرش نکن.</small>
+  </section>
+
+  <section>
+    <h2>رمزگذاری</h2>
+    <label for="plain">متن رمزها</label>
+    <textarea id="plain" autocomplete="off" spellcheck="false"></textarea>
+    <label for="encryptKey">فایل تابع تبدیل‌کننده</label>
+    <input id="encryptKey" type="file" accept=".js">
+    <button id="encrypt">ساخت vault.json</button>
+  </section>
+
+  <section>
+    <h2>رمزگشایی</h2>
+    <label for="vault">فایل رمزگذاری‌شده</label>
+    <input id="vault" type="file" accept=".json">
+    <label for="decryptKey">فایل کلید</label>
+    <input id="decryptKey" type="file" accept=".js">
+    <button id="decrypt">نمایش محتوا</button>
+    <button id="hide">پاک‌کردن محتوا از صفحه</button>
+    <pre id="result"></pre>
+  </section>
+
+  <p id="status" role="status"></p>
+</main>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  function download(name, text) {
+    const url = URL.createObjectURL(
+      new Blob([text], { type: "application/octet-stream" })
+    );
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+
+  // کد فایلِ کاربر داخل یک iframe جدا و محدود اجرا می‌شود.
+  const frameHTML = `<!doctype html>
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; connect-src 'none'; form-action 'none'">
+<script>
+  addEventListener("message", async event => {
+    if (typeof event.data?.code !== "string") return;
+
+    try {
+      const transform =
+        new Function(event.data.code + "\\nreturn transform;")();
+
+      if (typeof transform !== "function")
+        throw new Error("تابع transform پیدا نشد");
+
+      const output = await transform(
+        event.data.value,
+        event.data.mode
+      );
+
+      if (typeof output !== "string")
+        throw new Error("خروجی تابع باید رشته باشد");
+
+      parent.postMessage({ ok: true, output }, "*");
+    } catch (error) {
+      parent.postMessage({
+        ok: false,
+        error: error.message || "خطای تابع"
+      }, "*");
+    }
+  });
+
+  parent.postMessage({ ready: true }, "*");
+` + "</scr" + "ipt>";
+
+  function runTransform(code, mode, value) {
+    return new Promise((resolve, reject) => {
+      const frame = document.createElement("iframe");
+      frame.setAttribute("sandbox", "allow-scripts");
+      frame.style.display = "none";
+
+      let started = false;
+      let finished = false;
+
+      const timer = setTimeout(() => {
+        finish(new Error("اجرای تابع بیش‌ازحد طول کشید"));
+      }, 20000);
+
+      function finish(error, output) {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        removeEventListener("message", onMessage);
+        frame.remove();
+        error ? reject(error) : resolve(output);
+      }
+
+      function onMessage(event) {
+        if (event.source !== frame.contentWindow) return;
+
+        if (event.data?.ready && !started) {
+          started = true;
+          frame.contentWindow.postMessage({ code, mode, value }, "*");
+        } else if (typeof event.data?.ok === "boolean") {
+          event.data.ok
+            ? finish(null, event.data.output)
+            : finish(new Error(event.data.error));
+        }
+      }
+
+      addEventListener("message", onMessage);
+      frame.srcdoc = frameHTML;
+      document.body.append(frame);
+    });
+  }
+
+  function makeKeySource(hex) {
+    return `const KEY_HEX = "${hex}";
+
+async function transform(value, mode) {
+  const raw = Uint8Array.from(
+    KEY_HEX.match(/../g),
+    pair => parseInt(pair, 16)
+  );
+
+  const key = await crypto.subtle.importKey(
+    "raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]
+  );
+
+  if (mode === "encrypt") {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      key,
+      new TextEncoder().encode(value)
+    );
+
+    return JSON.stringify({
+      iv: Array.from(iv),
+      data: Array.from(new Uint8Array(data))
+    });
+  }
+
+  if (mode === "decrypt") {
+    const box = JSON.parse(value);
+
+    if (!Array.isArray(box.iv) || box.iv.length !== 12 ||
+        !Array.isArray(box.data) || box.data.length < 16) {
+      throw new Error("ساختار فایل رمزگذاری‌شده معتبر نیست");
+    }
+
+    const plain = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: new Uint8Array(box.iv) },
+      key,
+      new Uint8Array(box.data)
+    );
+
+    return new TextDecoder().decode(plain);
+  }
+
+  throw new Error("جهت تبدیل نامعتبر است");
+}
+`;
+  }
+
+  $("makeKey").onclick = () => {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    const hex = Array.from(
+      bytes,
+      n => n.toString(16).padStart(2, "0")
+    ).join("");
+
+    download("key.js", makeKeySource(hex));
+    $("status").textContent =
+      "key.js ساخته شد. برای بازکردن فایل‌های قبلی، همین کلید را نگه دار.";
+  };
+
+  $("encrypt").onclick = async () => {
+    try {
+      const file = $("encryptKey").files[0];
+      if (!file || !$("plain").value)
+        throw new Error("متن و فایل تابع را انتخاب کن");
+
+      const payload = await runTransform(
+        await file.text(),
+        "encrypt",
+        $("plain").value
+      );
+
+      download("vault.json", JSON.stringify({
+        version: 1,
+        payload
+      }));
+
+      $("plain").value = "";
+      $("status").textContent = "vault.json ساخته شد.";
+    } catch (error) {
+      $("status").textContent = error.message;
+    }
+  };
+
+  $("decrypt").onclick = async () => {
+    $("result").textContent = "";
+
+    try {
+      const vaultFile = $("vault").files[0];
+      const keyFile = $("decryptKey").files[0];
+
+      if (!vaultFile || !keyFile)
+        throw new Error("vault.json و فایل کلید را انتخاب کن");
+
+      const vault = JSON.parse(await vaultFile.text());
+
+      if (vault.version !== 1 ||
+          typeof vault.payload !== "string")
+        throw new Error("فایل vault.json معتبر نیست");
+
+      $("result").textContent = await runTransform(
+        await keyFile.text(),
+        "decrypt",
+        vault.payload
+      );
+
+      $("status").textContent = "محتوا باز شد.";
+    } catch (error) {
+      $("status").textContent =
+        "باز نشد؛ فایل یا کلید نادرست است. " + error.message;
+    }
+  };
+
+  $("hide").onclick = () => {
+    $("result").textContent = "";
+    $("status").textContent = "نمایش محتوا پاک شد.";
+  };
+</script>
+</body>
+</html>
